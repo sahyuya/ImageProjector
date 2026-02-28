@@ -20,10 +20,8 @@ class ProjectImageCommand(
     // プラグイン側の基準FOVを70に設定
     private val targetFovDegrees = 70.0
 
-    // 上が切れる問題の調整用オフセット (単位: ブロック)
-    // 正の値で画像全体が上へ、負の値で下へシフトします。
-    // まずは「5.0」くらいで上が埋まるか実験してみてください。
-    private val verticalOffsetPhysical = 5.0
+    // 限界高度見切れ対策のため0に設定
+    private val verticalOffsetPhysical = 0.0
 
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
         if (sender !is Player) {
@@ -32,7 +30,7 @@ class ProjectImageCommand(
         }
 
         if (args.size < 2) {
-            sender.sendMessage("${ChatColor.RED}使い方: /projectimage <画像のURL> <投影距離>")
+            sender.sendMessage("${ChatColor.RED}使い方: /projectimage <画像のURL> <投影距離> [fixed|free]")
             return true
         }
 
@@ -46,7 +44,10 @@ class ProjectImageCommand(
             return true
         }
 
-        sender.sendMessage("${ChatColor.AQUA}画像のダウンロードと解析を開始します (FOV: $targetFovDegrees, ガラス補正有効)...")
+        val modeStr = args.getOrNull(2)?.lowercase() ?: "fixed"
+        val mode = if (modeStr == "free") ProjectionMode.FREE else ProjectionMode.FIXED
+
+        sender.sendMessage("${ChatColor.AQUA}画像のダウンロードと解析を開始します (FOV: $targetFovDegrees, モード: $modeStr)...")
 
         Bukkit.getScheduler().runTaskAsynchronously(plugin, Runnable {
             try {
@@ -67,9 +68,9 @@ class ProjectImageCommand(
                 // 3. 画像の取得、16:9クロップ、リサイズ
                 val processedImage = ImageProcessor.fetchAndProcessImage(imageUrl, targetWidth, targetHeight)
 
-                // 4. 配置ブロックの計算 (ガラス層の計算と上下オフセットを含む)
+                // 4. 配置ブロックの計算 (モードを渡して方向とシェーディングを制御)
                 val calculator = ProjectionCalculator(palette)
-                val placements = calculator.calculate(sender, processedImage, distance, targetFovDegrees, verticalOffsetPhysical)
+                val placements = calculator.calculate(sender, processedImage, distance, targetFovDegrees, verticalOffsetPhysical, mode)
 
                 sender.sendMessage("${ChatColor.YELLOW}計算完了。ブロックの配置を開始します... (総ブロック数: ${placements.size})")
 
