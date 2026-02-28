@@ -1,0 +1,87 @@
+package com.github.sahyuya.imageProjector
+
+import com.github.sahyuya.imageProjector.palette.BlockPalette
+import com.github.sahyuya.imageProjector.task.BlockPlacer
+import org.bukkit.Bukkit
+import org.bukkit.ChatColor
+import org.bukkit.command.Command
+import org.bukkit.command.CommandExecutor
+import org.bukkit.command.CommandSender
+import org.bukkit.entity.Player
+import org.bukkit.plugin.Plugin
+import java.util.logging.Level
+import kotlin.math.tan
+
+class ProjectImageCommand(
+    private val plugin: Plugin,
+    private val palette: BlockPalette
+) : CommandExecutor {
+
+    // プラグイン側の基準FOVを70に設定
+    private val targetFovDegrees = 70.0
+
+    // 上が切れる問題の調整用オフセット (単位: ブロック)
+    // 正の値で画像全体が上へ、負の値で下へシフトします。
+    // まずは「5.0」くらいで上が埋まるか実験してみてください。
+    private val verticalOffsetPhysical = 5.0
+
+    override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
+        if (sender !is Player) {
+            sender.sendMessage("このコマンドはプレイヤーのみ実行可能です。")
+            return true
+        }
+
+        if (args.size < 2) {
+            sender.sendMessage("${ChatColor.RED}使い方: /projectimage <画像のURL> <投影距離>")
+            return true
+        }
+
+        val imageUrl = args[0]
+        val distance: Double
+
+        try {
+            distance = args[1].toDouble()
+        } catch (e: NumberFormatException) {
+            sender.sendMessage("${ChatColor.RED}距離には数値を指定してください。")
+            return true
+        }
+
+        sender.sendMessage("${ChatColor.AQUA}画像のダウンロードと解析を開始します (FOV: $targetFovDegrees, ガラス補正有効)...")
+
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, Runnable {
+            try {
+                // 1. 距離とFOVから、投影面の物理サイズ（メートル＝ブロック数）を逆算
+                val fovRadians = Math.toRadians(targetFovDegrees)
+                val screenHeightPhysical = 2.0 * distance * tan(fovRadians / 2.0)
+                val screenWidthPhysical = screenHeightPhysical * (16.0 / 9.0)
+
+                // 2. 隙間を防ぐため、物理サイズより少し高密度(1.5倍)でサンプリングする
+                val targetWidth = (screenWidthPhysical * 1.5).toInt()
+                val targetHeight = (screenHeightPhysical * 1.5).toInt()
+
+                if (targetWidth <= 0 || targetHeight <= 0) {
+                    sender.sendMessage("${ChatColor.RED}距離が短すぎるか計算エラーです。")
+                    return@Runnable
+                }
+
+                // 3. 画像の取得、16:9クロップ、リサイズ
+                val processedImage = ImageProcessor.fetchAndProcessImage(imageUrl, targetWidth, targetHeight)
+
+                // 4. 配置ブロックの計算 (ガラス層の計算と上下オフセットを含む)
+                val calculator = ProjectionCalculator(palette)
+                val placements = calculator.calculate(sender, processedImage, distance, targetFovDegrees, verticalOffsetPhysical)
+
+                sender.sendMessage("${ChatColor.YELLOW}計算完了。ブロックの配置を開始します... (総ブロック数: ${placements.size})")
+
+                // 5. メインスレッドで配置タスクを実行
+                BlockPlacer(sender, placements).runTaskTimer(plugin, 0L, 1L)
+
+            } catch (e: Exception) {
+                plugin.logger.log(Level.SEVERE, "投影処理中にエラーが発生しました", e)
+                sender.sendMessage("${ChatColor.RED}エラーが発生しました: ${e.message}")
+            }
+        })
+
+        return true
+    }
+}

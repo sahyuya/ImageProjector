@@ -1,0 +1,8 @@
+name: ImageProjector
+version: '1.0.0'
+main: com.github.sahyuya.imageProjector.ImageProjector
+api-version: '1.21'
+commands:
+  projectimage:
+    description: "視線の先に画像を3D投影してブロックを配置します"
+    usage: "/projectimage <URL> <width> <height> <distance>"
