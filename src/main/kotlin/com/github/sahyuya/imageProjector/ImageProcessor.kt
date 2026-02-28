@@ -2,8 +2,6 @@ package com.github.sahyuya.imageProjector
 
 import java.awt.Image
 import java.awt.image.BufferedImage
-import java.awt.image.ConvolveOp
-import java.awt.image.Kernel
 import java.net.URL
 import javax.imageio.ImageIO
 
@@ -13,14 +11,10 @@ object ImageProcessor {
         val url = URL(urlString)
         val image = ImageIO.read(url) ?: throw IllegalArgumentException("画像の読み込みに失敗しました")
 
-        // 1. 画像を短辺に合わせて16:9にクロップ
         val cropped = cropTo16by9(image)
 
-        // 2. 最適なブロック解像度に合わせてスムーズリサイズ
-        val resized = resizeSmooth(cropped, targetWidth, targetHeight)
-
-        // 3. ノイズを抑える水彩画風の平滑化フィルタを適用
-        return applyWatercolorEffect(resized)
+        // ぼかしフィルタを外し、鮮明なスムーズリサイズのみ適用
+        return resizeSmooth(cropped, targetWidth, targetHeight)
     }
 
     private fun cropTo16by9(image: BufferedImage): BufferedImage {
@@ -51,25 +45,6 @@ object ImageProcessor {
         val g2d = outputImage.createGraphics()
         g2d.drawImage(resultingImage, 0, 0, null)
         g2d.dispose()
-        return outputImage
-    }
-
-    /**
-     * 3x3の平滑化フィルタを用いて、ピクセル単位の鋭い色の落差（ノイズ）をぼかし、
-     * マイクラのガラスと相性の良い水彩画のような滑らかさを生み出す。
-     */
-    private fun applyWatercolorEffect(image: BufferedImage): BufferedImage {
-        val weight = 1.0f / 9.0f
-        val matrix = floatArrayOf(
-            weight, weight, weight,
-            weight, weight, weight,
-            weight, weight, weight
-        )
-        val kernel = Kernel(3, 3, matrix)
-        val op = ConvolveOp(kernel, ConvolveOp.EDGE_NO_OP, null)
-
-        val outputImage = BufferedImage(image.width, image.height, BufferedImage.TYPE_INT_RGB)
-        op.filter(image, outputImage)
         return outputImage
     }
 }

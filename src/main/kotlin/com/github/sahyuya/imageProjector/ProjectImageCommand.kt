@@ -1,7 +1,6 @@
 package com.github.sahyuya.imageProjector
 
 import com.github.sahyuya.imageProjector.palette.BlockPalette
-import com.github.sahyuya.imageProjector.task.BlockPlacer
 import org.bukkit.Bukkit
 import org.bukkit.ChatColor
 import org.bukkit.command.Command
@@ -25,12 +24,12 @@ class ProjectImageCommand(
 
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
         if (sender !is Player) {
-            sender.sendMessage("このコマンドはプレイヤーのみ実行可能です。")
+            sender.sendMessage("${ChatColor.RED}このコマンドはプレイヤーのみ実行可能です。")
             return true
         }
 
         if (args.size < 2) {
-            sender.sendMessage("${ChatColor.RED}使い方: /projectimage <画像のURL> <投影距離> [fixed|free]")
+            sender.sendMessage("${ChatColor.RED}使い方: /projectimage <画像のURL> <投影距離> [fixed|free] [ガラス最大層数(0-7)]")
             return true
         }
 
@@ -47,7 +46,10 @@ class ProjectImageCommand(
         val modeStr = args.getOrNull(2)?.lowercase() ?: "fixed"
         val mode = if (modeStr == "free") ProjectionMode.FREE else ProjectionMode.FIXED
 
-        sender.sendMessage("${ChatColor.AQUA}画像のダウンロードと解析を開始します (FOV: $targetFovDegrees, モード: $modeStr)...")
+        // 追加: ガラスの最大層数を引数から取得（デフォルト2層、最大7層に制限）
+        val maxLayers = args.getOrNull(3)?.toIntOrNull()?.coerceIn(0, 7) ?: 2
+
+        sender.sendMessage("${ChatColor.AQUA}画像のダウンロードと解析を開始します (FOV: $targetFovDegrees, モード: $modeStr, 最大層数: $maxLayers)...")
 
         Bukkit.getScheduler().runTaskAsynchronously(plugin, Runnable {
             try {
@@ -68,13 +70,13 @@ class ProjectImageCommand(
                 // 3. 画像の取得、16:9クロップ、リサイズ
                 val processedImage = ImageProcessor.fetchAndProcessImage(imageUrl, targetWidth, targetHeight)
 
-                // 4. 配置ブロックの計算 (モードを渡して方向とシェーディングを制御)
+                // 4. 配置ブロックの計算 (モードと最大層数を渡す)
                 val calculator = ProjectionCalculator(palette)
-                val placements = calculator.calculate(sender, processedImage, distance, targetFovDegrees, verticalOffsetPhysical, mode)
+                val placements = calculator.calculate(sender, processedImage, distance, targetFovDegrees, verticalOffsetPhysical, mode, maxLayers)
 
                 sender.sendMessage("${ChatColor.YELLOW}計算完了。ブロックの配置を開始します... (総ブロック数: ${placements.size})")
 
-                // 5. メインスレッドで配置タスクを実行
+                // メインスレッドで配置タスクを実行
                 BlockPlacer(sender, placements).runTaskTimer(plugin, 0L, 1L)
 
             } catch (e: Exception) {

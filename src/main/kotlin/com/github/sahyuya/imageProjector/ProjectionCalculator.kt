@@ -24,18 +24,20 @@ class ProjectionCalculator(private val palette: BlockPalette) {
         distance: Double,
         fovDegrees: Double,
         verticalOffset: Double = 0.0,
-        mode: ProjectionMode = ProjectionMode.FIXED
+        mode: ProjectionMode = ProjectionMode.FIXED,
+        maxGlassLayers: Int = 2 // デフォルト2層
     ): List<BlockPlacement> {
         val placements = mutableListOf<BlockPlacement>()
 
         val eye = player.eyeLocation
+        val world = eye.world ?: return emptyList()
+
         val origin = eye.toVector()
         val dir = eye.direction.normalize()
 
         var forward = dir.clone()
         var fixedShading = 1.0
 
-        // FIXEDモードの場合は視線を最も近い軸にスナップさせる
         if (mode == ProjectionMode.FIXED) {
             val ax = abs(dir.x)
             val ay = abs(dir.y)
@@ -49,7 +51,6 @@ class ProjectionCalculator(private val palette: BlockPalette) {
                 forward = Vector(0, 0, if (dir.z > 0) 1 else -1)
             }
 
-            // ブロックの見える面（プレイヤーから見た法線）は forward の逆方向
             val normal = forward.clone().multiply(-1.0)
             fixedShading = if (abs(normal.x) > 0.5) 0.6
             else if (abs(normal.z) > 0.5) 0.8
@@ -71,11 +72,8 @@ class ProjectionCalculator(private val palette: BlockPalette) {
         val screenHeightPhysical = 2.0 * distance * tan(fovRadians / 2.0)
         val screenWidthPhysical = screenHeightPhysical * (16.0 / 9.0)
 
-        // 重複配置を避けるためのSet
         val placedBlocks = mutableSetOf<String>()
-
-        // ガラスを配置するレイヤーの距離（基底より1ブロック手前）
-        val glassDistance = distance - 1.0
+        val distBase = distance
 
         for (y in 0 until imgHeight) {
             for (x in 0 until imgWidth) {
@@ -91,11 +89,9 @@ class ProjectionCalculator(private val palette: BlockPalette) {
 
                 val ray = pixelPos.clone().subtract(origin).normalize()
 
-                // 見える面に対するシェーディング係数の計算
                 val pixelShading = if (mode == ProjectionMode.FIXED) {
                     fixedShading
                 } else {
-                    // FREEモード：視線レイによる見え方の面積比率を加重平均
                     val viewDir = ray.clone().multiply(-1.0)
                     val wX = abs(viewDir.x)
                     val wY = abs(viewDir.y)
@@ -105,40 +101,53 @@ class ProjectionCalculator(private val palette: BlockPalette) {
                     (wX * 0.6 + wY * fY + wZ * 0.8) / sum
                 }
 
-                // 目標色に一番近い基底とガラスの組み合わせを取得（シェーディングを考慮）
-                val (baseMaterial, glassMaterial) = palette.getBestCombination(targetColor, pixelShading)
+                // 最大層数を指定して最適構成を取得
+                val combo = palette.getBestCombination(targetColor, pixelShading, maxGlassLayers)
 
-                // 1. 基底ブロックの計算と配置
-                val tBase = distance / ray.dot(forward)
-                val basePoint = origin.clone().add(ray.clone().multiply(tBase))
+                // 1. 基底ブロック (Base)
+                addPlacement(placements, placedBlocks, world, origin, ray, forward, distBase, combo.base)
 
-                val baseBlockX = basePoint.blockX
-                val baseBlockY = basePoint.blockY
-                val baseBlockZ = basePoint.blockZ
-                val baseKey = "$baseBlockX,$baseBlockY,$baseBlockZ"
+                // 2. ガラス層群 (1〜N層)
+                combo.glasses.forEachIndexed { index, glassMat ->
+                    val distGlass = if (index == 0) {
+                        // 1層目: 基底の1ブロック手前（微調整用）
+                        distance - 1.0
+                    } else {
+                        // 2層目以降: 全体の20%手前(0.8), 30%手前(0.7)... と遠近法に従って離していく
+                        val ratio = 1.0 - (0.1 * (index + 1))
+                        val minGap = index + 1.0 // 前の層に埋まらないよう、最低でも (index+1) ブロックは離す
+                        Math.min(distance - minGap, distance * ratio)
+                    }
 
-                if (placedBlocks.add(baseKey)) {
-                    val baseLoc = Location(eye.world, baseBlockX.toDouble(), baseBlockY.toDouble(), baseBlockZ.toDouble())
-                    placements.add(BlockPlacement(baseLoc, baseMaterial))
-                }
-
-                // 2. ガラスブロックの計算と配置（存在する場合）
-                if (glassMaterial != null && glassDistance > 0) {
-                    val tGlass = glassDistance / ray.dot(forward)
-                    val glassPoint = origin.clone().add(ray.clone().multiply(tGlass))
-
-                    val glassBlockX = glassPoint.blockX
-                    val glassBlockY = glassPoint.blockY
-                    val glassBlockZ = glassPoint.blockZ
-                    val glassKey = "$glassBlockX,$glassBlockY,$glassBlockZ"
-
-                    if (placedBlocks.add(glassKey)) {
-                        val glassLoc = Location(eye.world, glassBlockX.toDouble(), glassBlockY.toDouble(), glassBlockZ.toDouble())
-                        placements.add(BlockPlacement(glassLoc, glassMaterial))
+                    if (distGlass > 0) {
+                        addPlacement(placements, placedBlocks, world, origin, ray, forward, distGlass, glassMat)
                     }
                 }
             }
         }
         return placements
+    }
+
+    private fun addPlacement(
+        placements: MutableList<BlockPlacement>,
+        placedBlocks: MutableSet<String>,
+        world: org.bukkit.World,
+        origin: Vector,
+        ray: Vector,
+        forward: Vector,
+        dist: Double,
+        material: Material
+    ) {
+        val t = dist / ray.dot(forward)
+        val point = origin.clone().add(ray.clone().multiply(t))
+        val bx = point.blockX
+        val by = point.blockY
+        val bz = point.blockZ
+        val key = "$bx,$by,$bz"
+
+        if (placedBlocks.add(key)) {
+            val loc = Location(world, bx.toDouble(), by.toDouble(), bz.toDouble())
+            placements.add(BlockPlacement(loc, material))
+        }
     }
 }
