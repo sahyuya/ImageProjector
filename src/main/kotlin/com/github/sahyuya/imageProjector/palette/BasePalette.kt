@@ -40,7 +40,6 @@ class BlockPalette {
         basePalette[Material.BLACK_CONCRETE] = Color(8, 10, 15)
 
         // --- コンクリートパウダー ---
-        // ConcurrentModificationExceptionを防ぐため、一時リストに溜めてから追加する
         val powderEntries = mutableListOf<Pair<Material, Color>>()
         basePalette.forEach { (mat, col) ->
             val powderMat = Material.getMaterial(mat.name + "_POWDER")
@@ -74,30 +73,40 @@ class BlockPalette {
         glassPalette[Material.BLACK_STAINED_GLASS] = Color(25, 25, 25)
     }
 
-    /**
-     * ビームサーチを用いて、多層（指定された最大層まで）の最適構成を探索する
-     */
     fun getBestCombination(target: Color, shadingFactor: Double, maxGlassLayers: Int = 2): LayerCombination {
         val beamWidth = 5
-        val penaltyPerGlass = 15.0 // 無駄にガラスを重ねないためのペナルティ
+
+        // 最大層数が多いほど、ガラスを追加するペナルティを指数関数的に下げる（7層ならほぼペナルティ0に等しい）
+        val layerBoost = (maxGlassLayers - 2).coerceAtLeast(0).toDouble()
+        val penaltyPerGlass = 15.0 / 2.0.pow(layerBoost)
+
+        // 層数が多い場合、基底層をあえて「派手」な色に誘導する仮想ターゲットを作る
+        val baseTarget = if (maxGlassLayers > 2) boostColorForBase(target, maxGlassLayers) else target
 
         // 1. 基底層(Base)の探索
         var beam = mutableListOf<LayerCombination>()
         for ((baseMat, baseCol) in basePalette) {
             val shadedBase = applyShading(baseCol, shadingFactor)
-            val dist = colorDistance(shadedBase, target)
+            // 基底層を選ぶときだけ、派手にブーストされたターゲットを使う
+            val dist = colorDistance(shadedBase, baseTarget)
             beam.add(LayerCombination(baseMat, emptyList(), shadedBase, dist))
         }
         beam = beam.sortedBy { it.score }.take(beamWidth).toMutableList()
 
+        // ガラス探索に入る前に、スコアを「本来のターゲット色との距離」に修正する
+        beam = beam.map { state ->
+            state.copy(score = colorDistance(state.blendedColor, target))
+        }.toMutableList()
+
         if (maxGlassLayers <= 0) return beam.first()
 
-        // 2. ガラス層の探索 (指定された最大層数まで動的にループ)
+        // 2. ガラス層の探索
         for (layer in 1..maxGlassLayers) {
             val nextBeam = mutableListOf<LayerCombination>()
             for (state in beam) {
-                // そのまま（これ以上ガラスを追加しない）の選択肢を残す
-                nextBeam.add(state)
+                // 現状維持の選択肢（これ以上ガラスを置かない）
+                val currentDist = colorDistance(state.blendedColor, target) + (penaltyPerGlass * state.glasses.size)
+                nextBeam.add(state.copy(score = currentDist))
 
                 // すでに前のステップでガラス追加を止めている場合は追加処理をスキップ
                 if (state.glasses.size < layer - 1) continue
@@ -110,13 +119,40 @@ class BlockPalette {
                     nextBeam.add(LayerCombination(state.base, newGlasses, blended, dist))
                 }
             }
-            // 同じ構成の重複を除きつつスコア順で絞る
             beam = nextBeam.distinctBy { it.base.name + ":" + it.glasses.joinToString { g -> g.name } }
                 .sortedBy { it.score }
                 .take(beamWidth).toMutableList()
         }
 
         return beam.first()
+    }
+
+    /**
+     * 多層指定時に、ガラスで暗く濁ることを逆算し、
+     * ターゲット色の彩度と明度をブーストして極端に派手な原色を引き出す関数
+     */
+    private fun boostColorForBase(original: Color, maxGlassLayers: Int): Color {
+        val hsb = FloatArray(3)
+        Color.RGBtoHSB(original.red, original.green, original.blue, hsb)
+
+        // 7層のときに非常に強いブーストがかかるように計算
+        val boostFactor = (maxGlassLayers - 2) * 0.15f
+
+        var s = hsb[1]
+        var v = hsb[2]
+
+        // 彩度が少しでもある色は、さらに強烈に鮮やかにする
+        if (s > 0.05f) {
+            s += boostFactor * (0.5f + s * 0.5f)
+        }
+        // ガラスを重ねると暗くなるため、明度はあらかじめ大きく上げておく
+        v += boostFactor * 0.8f
+
+        s = s.coerceIn(0f, 1f)
+        v = v.coerceIn(0f, 1f)
+
+        val rgb = Color.HSBtoRGB(hsb[0], s, v)
+        return Color(rgb)
     }
 
     private fun applyExponentialBlend(innerColor: Color, glassColor: Color): Color {
