@@ -1,19 +1,33 @@
 package com.github.sahyuya.imageProjector
 
-import com.github.sahyuya.imageProjector.palette.BlockPalette
+import com.github.sahyuya.imageProjector.core.BlockPlacer
+import com.github.sahyuya.imageProjector.core.ImageProcessor
+import com.github.sahyuya.imageProjector.core.ProjectionCalculator
+import com.github.sahyuya.imageProjector.palette.ConcreteGlassPalette
+import com.github.sahyuya.imageProjector.palette.FullBlockPalette
 import org.bukkit.plugin.java.JavaPlugin
 
+/**
+ * プラグインのメインクラス。
+ * 各機能のインスタンスを生成し、コマンドに依存関係として注入（DI）します。
+ */
 class ImageProjector : JavaPlugin() {
-    private lateinit var palette: BlockPalette
-
     override fun onEnable() {
-        logger.info("ImageProjector Plugin Enabled (Kotlin / Refactored).")
-
         // パレットの初期化
-        palette = BlockPalette()
-        palette.initialize()
+        val fullPalette = FullBlockPalette().apply { initialize() }
+        val concretePalette = ConcreteGlassPalette().apply { initialize() }
+
+        // コア機能の初期化
+        val imageProcessor = ImageProcessor()
+        val calculator = ProjectionCalculator()
+        // 分散配置用のタスクを回すために、プラグイン自身のインスタンスを渡す
+        val blockPlacer = BlockPlacer(this)
 
         // コマンドの登録
-        getCommand("projectimage")?.setExecutor(ProjectImageCommand(this, palette))
+        getCommand("print")?.setExecutor(
+            ProjectImageCommand(this, imageProcessor, calculator, blockPlacer, fullPalette, concretePalette)
+        )
+
+        logger.info("ImageProjector (Anamorphic Art Edition) enabled.")
     }
 }

@@ -1,90 +1,103 @@
 package com.github.sahyuya.imageProjector
 
+import com.github.sahyuya.imageProjector.core.BlockPlacer
+import com.github.sahyuya.imageProjector.core.ImageProcessor
+import com.github.sahyuya.imageProjector.core.ProjectionCalculator
 import com.github.sahyuya.imageProjector.palette.BlockPalette
-import org.bukkit.Bukkit
 import org.bukkit.ChatColor
 import org.bukkit.command.Command
 import org.bukkit.command.CommandExecutor
 import org.bukkit.command.CommandSender
 import org.bukkit.entity.Player
 import org.bukkit.plugin.Plugin
-import java.util.logging.Level
-import kotlin.math.tan
+import kotlin.concurrent.thread
 
 class ProjectImageCommand(
     private val plugin: Plugin,
-    private val palette: BlockPalette
+    private val imageProcessor: ImageProcessor,
+    private val calculator: ProjectionCalculator,
+    private val blockPlacer: BlockPlacer,
+    private val fullPalette: BlockPalette,
+    private val concretePalette: BlockPalette
 ) : CommandExecutor {
-
-    // プラグイン側の基準FOVを70に設定
-    private val targetFovDegrees = 70.0
-
-    // 限界高度見切れ対策のため0に設定
-    private val verticalOffsetPhysical = 0.0
 
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
         if (sender !is Player) {
-            sender.sendMessage("${ChatColor.RED}このコマンドはプレイヤーのみ実行可能です。")
+            sender.sendMessage("プレイヤーのみ実行可能です。")
             return true
         }
 
         if (args.size < 2) {
-            sender.sendMessage("${ChatColor.RED}使い方: /projectimage <画像のURL> <投影距離> [fixed|free] [ガラス最大層数(0-7)]")
+            sender.sendMessage("${ChatColor.RED}使用法: /print <画像URL> <描画距離> [-f] [-c]")
             return true
         }
 
-        val imageUrl = args[0]
-        val distance: Double
-
-        try {
-            distance = args[1].toDouble()
-        } catch (e: NumberFormatException) {
-            sender.sendMessage("${ChatColor.RED}距離には数値を指定してください。")
+        val urlStr = args[0]
+        val distance = args[1].toDoubleOrNull()
+        if (distance == null || distance <= 0) {
+            sender.sendMessage("${ChatColor.RED}描画距離は正の数値で指定してください。")
             return true
         }
 
-        val modeStr = args.getOrNull(2)?.lowercase() ?: "fixed"
-        val mode = if (modeStr == "free") ProjectionMode.FREE else ProjectionMode.FIXED
+        val options = args.drop(2).map { it.lowercase() }
+        val isFreeMode = options.contains("-f")
+        val useConcrete = options.contains("-c")
+        val activePalette = if (useConcrete) concretePalette else fullPalette
 
-        // 追加: ガラスの最大層数を引数から取得（デフォルト2層、最大7層に制限）
-        val maxLayers = args.getOrNull(3)?.toIntOrNull()?.coerceIn(0, 7) ?: 2
+        // 【修正】非同期処理に入る"前"（メインスレッド）で、プレイヤーの座標・視点を安全に取得・固定する
+        // 起点をプレイヤーの目の高さ(+1.5)に設定
+        val originLoc = sender.location.clone().apply { add(0.0, 1.5, 0.0) }
+        val yaw = originLoc.yaw
+        val pitch = originLoc.pitch
 
-        sender.sendMessage("${ChatColor.AQUA}画像のダウンロードと解析を開始します (FOV: $targetFovDegrees, モード: $modeStr, 最大層数: $maxLayers)...")
+        sender.sendMessage("${ChatColor.AQUA}画像をダウンロード・解析中...")
 
-        Bukkit.getScheduler().runTaskAsynchronously(plugin, Runnable {
+        thread {
             try {
-                // 1. 距離とFOVから、投影面の物理サイズ（メートル＝ブロック数）を逆算
-                val fovRadians = Math.toRadians(targetFovDegrees)
-                val screenHeightPhysical = 2.0 * distance * tan(fovRadians / 2.0)
-                val screenWidthPhysical = screenHeightPhysical * (16.0 / 9.0)
+                // 負荷軽減のため画像を150ピクセルにリサイズ
+                val image = imageProcessor.fetchImage(urlStr, 150)
 
-                // 2. 隙間を防ぐため、物理サイズより少し高密度(1.5倍)でサンプリングする
-                val targetWidth = (screenWidthPhysical * 1.5).toInt()
-                val targetHeight = (screenHeightPhysical * 1.5).toInt()
+                // 【修正】過去の設計通り、座標の衝突（自滅）を防ぐため「1ピクセル ＝ 1ブロック」の等倍スケールに戻す
+                val widthScale = image.width.toDouble()
+                val heightScale = image.height.toDouble()
 
-                if (targetWidth <= 0 || targetHeight <= 0) {
-                    sender.sendMessage("${ChatColor.RED}距離が短すぎるか計算エラーです。")
-                    return@Runnable
+                sender.sendMessage("${ChatColor.GREEN}投影計算を開始します...")
+
+                // 計算自体は非同期で行い、サーバーのフリーズを防ぐ
+                val placements = calculator.calculatePlacements(
+                    palette = activePalette,
+                    image = image,
+                    origin = originLoc,
+                    yaw = yaw,
+                    pitch = pitch,
+                    widthScale = widthScale,
+                    heightScale = heightScale,
+                    baseDistance = distance,
+                    freeMode = isFreeMode
+                )
+
+                if (placements.isEmpty()) {
+                    sender.sendMessage("${ChatColor.RED}配置できるブロックがありませんでした。透過画像か確認してください。")
+                    return@thread
                 }
 
-                // 3. 画像の取得、16:9クロップ、リサイズ
-                val processedImage = ImageProcessor.fetchAndProcessImage(imageUrl, targetWidth, targetHeight)
+                // ブロックの実際の配置はメインスレッドに戻して安全に実行
+                plugin.server.scheduler.runTask(plugin, Runnable {
+                    sender.sendMessage("${ChatColor.YELLOW}約${placements.size}個のブロック配置を開始しました。完了までお待ちください...")
 
-                // 4. 配置ブロックの計算 (モードと最大層数を渡す)
-                val calculator = ProjectionCalculator(palette)
-                val placements = calculator.calculate(sender, processedImage, distance, targetFovDegrees, verticalOffsetPhysical, mode, maxLayers)
-
-                sender.sendMessage("${ChatColor.YELLOW}計算完了。ブロックの配置を開始します... (総ブロック数: ${placements.size})")
-
-                // メインスレッドで配置タスクを実行
-                BlockPlacer(sender, placements).runTaskTimer(plugin, 0L, 1L)
+                    blockPlacer.placeBlocks(placements) { actualPlaced ->
+                        sender.sendMessage("${ChatColor.GOLD}アートの生成が完了しました！ (実際に置かれたブロック数: $actualPlaced)")
+                        if (actualPlaced == 0) {
+                            sender.sendMessage("${ChatColor.RED}※配置数が0でした。描画距離が遠すぎるか、空中に置けない設定になっている可能性があります。")
+                        }
+                    }
+                })
 
             } catch (e: Exception) {
-                plugin.logger.log(Level.SEVERE, "投影処理中にエラーが発生しました", e)
                 sender.sendMessage("${ChatColor.RED}エラーが発生しました: ${e.message}")
+                e.printStackTrace()
             }
-        })
-
+        }
         return true
     }
 }
